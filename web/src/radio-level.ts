@@ -1,9 +1,13 @@
-// The radio's volume matching: modern masters are far louder than the game's EA Trax songs (about -8 LUFS), so a track of the folder is
-// measured after decoding (ITU-R BS.1770: K-weighting, 400 ms blocks, gated) and brought to that level.  A louder track is turned down;
-// a quieter one is turned up only as far as its peak allows (-0.3 dBFS), as the runtime clamps samples to full scale.  No limiter.
+// The radio's volume matching: modern masters are far louder than the game's EA Trax songs, so a track of the folder is measured
+// after decoding and brought to the level of those songs.  The level is that of the loudest 20 s (the drop), not of the whole track:
+// K-weighted (ITU-R BS.1770) power over a sliding 20 s window.  A track with a drop and a quiet intro is not turned up for the intro.
+// A louder track is turned down; a quieter one is turned up only as far as its peak allows (-0.3 dBFS), as the runtime clamps samples
+// to full scale.  No limiter.
+// The target is the median of the loudest 20 s of the 27 EA Trax songs as the game decodes them: -6.5 LUFS (sigma 1.0, from -9.0 to
+// -4.4; the same songs over the whole track: median -7.8, sigma 1.0).
 
-export const TARGET_LUFS = -8, PEAK_CEILING_DB = -0.3;
-const SEGMENT = 4410, SEGMENTS_PER_BLOCK = 4;   // 100 ms at the mixer's 44100 Hz; a block is 400 ms
+export const TARGET_LUFS = -6.5, PEAK_CEILING_DB = -0.3;
+const SEGMENT = 4410, WINDOW = 200;   // 100 ms at the mixer's 44100 Hz; 200 of them are 20 s
 // BS.1770 K-weighting at 44100 Hz: a high shelf (+4 dB, 1.5 kHz), then a high-pass (38 Hz); [b0, b1, b2, a1, a2]
 const STAGES = [
   [1.5309095946, -2.6511690324, 1.1691668584, -1.6637501101, 0.7126575310],
@@ -28,23 +32,19 @@ function segments(x: Float32Array, count: number): Float64Array {
   return sums;
 }
 
-/** Integrated loudness in LUFS, -Infinity for silence. */
+/** Loudness in LUFS of the loudest 20 s of the track (the whole track when it is shorter), -Infinity for silence. */
 export function loudness(left: Float32Array, right: Float32Array): number {
   const count = Math.floor(left.length / SEGMENT);
   if (!count) return -Infinity;
-  const l = segments(left, count), r = right === left ? l : segments(right, count);
-  const width = Math.min(SEGMENTS_PER_BLOCK, count), blocks: number[] = [];
-  for (let b = 0; b + width <= count; b++) {
-    let power = 0;
-    for (let k = 0; k < width; k++) power += l[b + k] + r[b + k];
-    blocks.push(power / width);
+  const l = segments(left, count), r = right === left ? l : segments(right, count), width = Math.min(WINDOW, count);
+  let power = 0, best = 0;
+  for (let k = 0; k < count; k++) {
+    power += l[k] + r[k];
+    if (k >= width) power -= l[k - width] + r[k - width];
+    if (k >= width - 1 && power > best) best = power;
   }
-  const lufs = (p: number) => -0.691 + 10 * Math.log10(p);
-  const mean = (list: number[]) => list.reduce((a, p) => a + p, 0) / list.length;
-  const loud = blocks.filter(p => lufs(p) > -70);
-  if (!loud.length) return -Infinity;
-  const kept = loud.filter(p => lufs(p) > lufs(mean(loud)) - 10);
-  return lufs(mean(kept));
+  const lufs = -0.691 + 10 * Math.log10(best / width);
+  return lufs > -70 ? lufs : -Infinity;
 }
 
 /** The factor to multiply a track by, 1 when it cannot be measured. */

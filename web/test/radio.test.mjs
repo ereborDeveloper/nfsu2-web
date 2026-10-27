@@ -14,7 +14,7 @@ const load = async f => await import('data:text/javascript;base64,' + Buffer.fro
   (await esbuild.build({ entryPoints: [path.join(ROOT, f)], bundle: true, format: 'esm', write: false })).outputFiles[0].text).toString('base64'));
 const { Radio } = await load('web/src/radio.ts');
 const { plaqueTags, gameText } = await load('web/src/radio-tags.ts');
-const { loudness, levelGain } = await load('web/src/radio-level.ts');
+const { loudness, levelGain, TARGET_LUFS } = await load('web/src/radio-level.ts');
 const { pickMusic, keptFolder } = await load('web/src/radio-folder.ts');
 const { RadioLink, RADIO_WORDS, RADIO_MAGIC, RADIO_VERSION } = await load('web/src/app/radio-link.ts');
 const W = Object.fromEntries(RADIO_WORDS.map((n, i) => [n, i]));
@@ -103,21 +103,27 @@ test('loudness follows BS.1770: a 997 Hz sine at -20 dBFS in both channels is -2
   assert.ok(Number.isFinite(lufs(sine(0.1, 0.1))));
 });
 
-test('a louder track is turned down to -8 LUFS, a quiet one is turned up to -8 or as far as its peak allows (-0.3 dBFS), silence is left', () => {
+test('a louder track is turned down to the level of the EA Trax songs, a quiet one is turned up to it or as far as its peak allows (-0.3 dBFS), silence is left', () => {
   for (const amp of [0.9, 0.5, 0.25]) {
     const x = sine(amp), g = levelGain(x, x);
-    assert.ok(Math.abs(lufs(x.map(v => v * g)) + 8) < 0.05, `amp ${amp}`);
+    assert.ok(Math.abs(lufs(x.map(v => v * g)) - TARGET_LUFS) < 0.05, `amp ${amp}`);
   }
   const quiet = Float32Array.from(sine(0.1), (v, i) => i % 4410 === 0 ? 0.5 : v), g = levelGain(quiet, quiet);
   assert.ok(g > 1 && Math.abs(quiet.reduce((m, v) => Math.max(m, Math.abs(v * g)), 0) - 10 ** (-0.3 / 20)) < 1e-4);
   assert.equal(levelGain(new Float32Array(44100), new Float32Array(44100)), 1);
 });
 
+test('the level is that of the loudest 20 s: a quiet intro does not count, a track shorter than 20 s counts whole', () => {
+  const drop = Float32Array.from({ length: 44100 * 50 }, (_, i) => (i < 44100 * 30 ? 0.02 : 0.3) * Math.sin(2 * Math.PI * 997 * i / 44100));
+  assert.ok(Math.abs(lufs(drop) - lufs(sine(0.3, 20))) < 0.05);
+  assert.ok(Math.abs(lufs(sine(0.3, 5)) - lufs(sine(0.3, 20))) < 0.05);
+});
+
 test('a track of the folder is brought to the level before it is handed over, and the log says by how much', async () => {
   const left = sine(0.9, 3), right = left.slice(), s = setup(['a.mp3'], async () => ({ numberOfChannels: 2, getChannelData: c => c ? right : left }));
   await s.started();
   await s.game(0, 1);
-  assert.ok(Math.abs(loudness(left, right) + 8) < 0.05);
+  assert.ok(Math.abs(loudness(left, right) - TARGET_LUFS) < 0.05);
   assert.deepEqual(left, right);
   assert.match(s.log.join(' '), /#1 level -\d+\.\d dB/);
 });
