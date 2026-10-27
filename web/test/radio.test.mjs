@@ -14,6 +14,7 @@ const load = async f => await import('data:text/javascript;base64,' + Buffer.fro
   (await esbuild.build({ entryPoints: [path.join(ROOT, f)], bundle: true, format: 'esm', write: false })).outputFiles[0].text).toString('base64'));
 const { Radio } = await load('web/src/radio.ts');
 const { plaqueTags, gameText } = await load('web/src/radio-tags.ts');
+const { loudness, levelGain } = await load('web/src/radio-level.ts');
 const { pickMusic, keptFolder } = await load('web/src/radio-folder.ts');
 const { RadioLink, RADIO_WORDS, RADIO_MAGIC, RADIO_VERSION } = await load('web/src/app/radio-link.ts');
 const W = Object.fromEntries(RADIO_WORDS.map((n, i) => [n, i]));
@@ -90,6 +91,35 @@ test('a song is served from the queue of its place, the next track is offered, a
   assert.deepEqual([s.w[W.ready_seq], s.w[W.written], text(s.memory, 0, 1), text(s.memory, 1, 1)], [1, RING, 'b', 'a']);
   s.w[W.read] = RING; await s.game(0, 1);
   assert.deepEqual([s.radio.song, s.w[W.written]], [null, RING * 2]);
+});
+
+const sine = (amp, seconds = 10) => Float32Array.from({ length: 44100 * seconds }, (_, i) => amp * Math.sin(2 * Math.PI * 997 * i / 44100));
+const lufs = x => loudness(x, x);
+
+test('loudness follows BS.1770: a 997 Hz sine at -20 dBFS in both channels is -20 LUFS, one channel is 3 LU lower, silence is nothing', () => {
+  assert.ok(Math.abs(lufs(sine(0.1)) + 20) < 0.05);
+  assert.ok(Math.abs(loudness(sine(0.1), new Float32Array(44100 * 10)) + 23.01) < 0.05);
+  assert.equal(lufs(new Float32Array(44100 * 3)), -Infinity);
+  assert.ok(Number.isFinite(lufs(sine(0.1, 0.1))));
+});
+
+test('a louder track is turned down to -8 LUFS, a quiet one is turned up to -8 or as far as its peak allows (-0.3 dBFS), silence is left', () => {
+  for (const amp of [0.9, 0.5, 0.25]) {
+    const x = sine(amp), g = levelGain(x, x);
+    assert.ok(Math.abs(lufs(x.map(v => v * g)) + 8) < 0.05, `amp ${amp}`);
+  }
+  const quiet = Float32Array.from(sine(0.1), (v, i) => i % 4410 === 0 ? 0.5 : v), g = levelGain(quiet, quiet);
+  assert.ok(g > 1 && Math.abs(quiet.reduce((m, v) => Math.max(m, Math.abs(v * g)), 0) - 10 ** (-0.3 / 20)) < 1e-4);
+  assert.equal(levelGain(new Float32Array(44100), new Float32Array(44100)), 1);
+});
+
+test('a track of the folder is brought to the level before it is handed over, and the log says by how much', async () => {
+  const left = sine(0.9, 3), right = left.slice(), s = setup(['a.mp3'], async () => ({ numberOfChannels: 2, getChannelData: c => c ? right : left }));
+  await s.started();
+  await s.game(0, 1);
+  assert.ok(Math.abs(loudness(left, right) + 8) < 0.05);
+  assert.deepEqual(left, right);
+  assert.match(s.log.join(' '), /#1 level -\d+\.\d dB/);
 });
 
 test('songs that change quickly decode one track at a time: the one under way, then only the latest', async () => {

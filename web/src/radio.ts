@@ -4,6 +4,7 @@
 // when the player asks for Shuffle.  Nothing here runs until the radio is used.
 import type { Lines, Place, RadioLink } from './app/radio-link';
 import { keptFolder, keepFolder, reopenFolder, sortedTracks, subfolderOf, type Folder, type Picked } from './radio-folder';
+import { levelGain } from './radio-level';
 import { plaqueTags, tagsOf } from './radio-tags';
 
 export type Mode = 'menu' | 'racing' | 'all' | 'off';
@@ -243,6 +244,11 @@ export class Radio {
       left = pcm.getChannelData(0); right = pcm.numberOfChannels > 1 ? pcm.getChannelData(1) : left;
       if (!left.length) throw new Error('no samples');
       if (left.length > MAX_FRAMES) throw new Error('longer than 15 minutes');
+      const gain = levelGain(left, right);   // toward the level of the game's songs, before anything is handed over
+      if (gain !== 1) {
+        for (const x of right === left ? [left] : [left, right]) for (let k = 0; k < x.length; k++) x[k] *= gain;
+        this.log(`#${i + 1} level ${(20 * Math.log10(gain)).toFixed(1)} dB`);
+      }
     } catch (e) { this.log(skipLine(i, e)); return 'skipped'; }
     this.song = { left, right, at: 0 };
     if (!link.serve(seq, left.length)) throw new Error('the game has no rings for the sound');
