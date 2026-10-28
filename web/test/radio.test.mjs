@@ -92,6 +92,21 @@ test('a song is served from the queue of its place, the next track is offered, a
   assert.deepEqual([s.radio.song, s.w[W.written]], [null, RING * 2]);
 });
 
+test("a track the decoder returns at another rate than the mixer's 44100 Hz is converted before it is played, with its pitch and duration kept", async () => {
+  for (const [rate, channels] of [[48000, 2], [32000, 2], [96000, 1], [44100, 2]]) {
+    const left = Float32Array.from({ length: rate * 2 }, (_, i) => 0.1 * Math.sin(2 * Math.PI * 1000 * i / rate)), right = left.slice();
+    const s = setup(['a.mp3'], async () => ({ sampleRate: rate, numberOfChannels: channels, getChannelData: c => c ? right : left }));
+    await s.started();
+    await s.game(0, 1);
+    const x = s.radio.song.left;
+    assert.ok(Math.abs(x.length - 88200) <= 1, `${rate} Hz: ${x.length} frames`);
+    let zero = 0;
+    for (let i = 1; i < x.length; i++) if ((x[i - 1] < 0) !== (x[i] < 0)) zero++;
+    assert.ok(Math.abs(zero - 4000) <= 5, `${rate} Hz: ${zero} zero crossings in 2 s`);
+    assert.equal(s.radio.song.right === x, channels === 1);
+  }
+});
+
 test('songs that change quickly decode one track at a time: the one under way, then only the latest', async () => {
   let running = 0, most = 0, decodes = 0;
   const done = [];

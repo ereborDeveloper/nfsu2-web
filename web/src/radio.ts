@@ -25,6 +25,18 @@ const readModes = (): Map<string, Mode> => {
 const RATE = 44100, CHUNK = 1 << 15, STEP_MS = 50, TAGS_KEPT = 16;   // the game mixer's rate; frames handed over at a time
 const MAX_FILE_BYTES = 160 << 20, MAX_FRAMES = RATE * 15 * 60;       // longer is a mix, not a song; a whole file is decoded into memory
 type Pair = [number, number];
+/** The mixer takes 44100 Hz frames.  A decoder that returns the track at another rate (a 32 kHz file left at 32000, a device rate such as
+ *  48000) would have it played at the wrong speed, so such a buffer is converted here by linear interpolation. */
+function atMixerRate(x: Float32Array, from: number): Float32Array {
+  if (from === RATE) return x;
+  if (!(from >= 8000 && from <= 384000)) throw new Error(`sample rate ${from} Hz`);
+  const out = new Float32Array(Math.floor(x.length * RATE / from)), step = from / RATE;
+  for (let k = 0; k < out.length; k++) {
+    const p = k * step, i = Math.floor(p), a = x[i];
+    out[k] = a + ((i + 1 < x.length ? x[i + 1] : a) - a) * (p - i);
+  }
+  return out;
+}
 const skipLine = (i: number, why: unknown) => `skips #${i + 1}: ${why}`;
 
 export class Radio {
@@ -240,7 +252,8 @@ export class Radio {
       this.decoding = decoding.catch(() => {});
       const pcm = await decoding;
       if (epoch !== this.epoch || this.seq !== seq) return 'stale';
-      left = pcm.getChannelData(0); right = pcm.numberOfChannels > 1 ? pcm.getChannelData(1) : left;
+      const from = pcm.sampleRate || RATE;
+      left = atMixerRate(pcm.getChannelData(0), from); right = pcm.numberOfChannels > 1 ? atMixerRate(pcm.getChannelData(1), from) : left;
       if (!left.length) throw new Error('no samples');
       if (left.length > MAX_FRAMES) throw new Error('longer than 15 minutes');
     } catch (e) { this.log(skipLine(i, e)); return 'skipped'; }
