@@ -4,6 +4,7 @@
 // when the player asks for Shuffle.  Nothing here runs until the radio is used.
 import type { Lines, Place, RadioLink } from './app/radio-link';
 import { keptFolder, keepFolder, reopenFolder, sortedTracks, subfolderOf, type Folder, type Picked } from './radio-folder';
+import { mp3Seconds } from './radio-mp3';
 import { plaqueTags, tagsOf } from './radio-tags';
 
 export type Mode = 'menu' | 'racing' | 'all' | 'off';
@@ -36,6 +37,13 @@ function atMixerRate(x: Float32Array, from: number): Float32Array {
     out[k] = a + ((i + 1 < x.length ? x[i + 1] : a) - a) * (p - i);
   }
   return out;
+}
+/** A buffer twice as long as its mp3 is (counted by frames) came back with every frame doubled: left and right in turn in one channel, or
+ *  a channel at twice the rate.  Every other frame gives the right speed for both. */
+function undoubled(chans: Float32Array[], seconds: number, want: number | null): Float32Array[] {
+  if (want === null || Math.abs(seconds / want - 2) > 0.04) return chans;
+  const every = (x: Float32Array, from: number) => Float32Array.from({ length: x.length >> 1 }, (_, k) => x[2 * k + from]);
+  return chans.length > 1 ? chans.map(x => every(x, 0)) : [every(chans[0], 0), every(chans[0], 1)];
 }
 const skipLine = (i: number, why: unknown) => `skips #${i + 1}: ${why}`;
 
@@ -242,18 +250,19 @@ export class Radio {
   /** A failure of reading, decoding or handing over the sound is the file's ("skipped": the next one plays); the runtime having no rings
    *  at all is the radio's (it turns off), and so is a whole lap of the folder without one track played. */
   private async load(link: RadioLink, seq: number, i: number, epoch: number): Promise<'played' | 'skipped' | 'ring' | 'stale'> {
-    let left: Float32Array, right: Float32Array;
+    let left: Float32Array, right: Float32Array, want = null as number | null;   // want: the seconds of an mp3, counted by its frames
     try {
       await this.decoding;                // songs that change quickly never hold two decoded tracks at once
       if (epoch !== this.epoch || this.seq !== seq) return 'stale';
       const file = await this.files[i].getFile();
       if (file.size > MAX_FILE_BYTES) throw new Error(`${Math.round(file.size / 1048576)} MB is too long for a song`);
-      const decoder = this.decoder ??= new OfflineAudioContext(2, 1, RATE), decoding = file.arrayBuffer().then(b => decoder.decodeAudioData(b));
+      const decoder = this.decoder ??= new OfflineAudioContext(2, 1, RATE), decoding = file.arrayBuffer().then(b => { want = mp3Seconds(b); return decoder.decodeAudioData(b); });
       this.decoding = decoding.catch(() => {});
       const pcm = await decoding;
       if (epoch !== this.epoch || this.seq !== seq) return 'stale';
       const from = pcm.sampleRate || RATE;
-      left = atMixerRate(pcm.getChannelData(0), from); right = pcm.numberOfChannels > 1 ? atMixerRate(pcm.getChannelData(1), from) : left;
+      const chans = undoubled(Array.from({ length: Math.min(2, pcm.numberOfChannels) }, (_, c) => pcm.getChannelData(c)), pcm.length / from, want);
+      left = atMixerRate(chans[0], from); right = chans.length > 1 ? atMixerRate(chans[1], from) : left;
       if (!left.length) throw new Error('no samples');
       if (left.length > MAX_FRAMES) throw new Error('longer than 15 minutes');
     } catch (e) { this.log(skipLine(i, e)); return 'skipped'; }

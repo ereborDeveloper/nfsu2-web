@@ -13,6 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const load = async f => await import('data:text/javascript;base64,' + Buffer.from(
   (await esbuild.build({ entryPoints: [path.join(ROOT, f)], bundle: true, format: 'esm', write: false })).outputFiles[0].text).toString('base64'));
 const { Radio } = await load('web/src/radio.ts');
+const { mp3Seconds } = await load('web/src/radio-mp3.ts');
 const { plaqueTags, gameText } = await load('web/src/radio-tags.ts');
 const { pickMusic, keptFolder } = await load('web/src/radio-folder.ts');
 const { RadioLink, RADIO_WORDS, RADIO_MAGIC, RADIO_VERSION } = await load('web/src/app/radio-link.ts');
@@ -23,7 +24,17 @@ const settle = async () => { for (let k = 0; k < 8; k++) await new Promise(r => 
 const pcm = frames => ({ numberOfChannels: 2, getChannelData: c => new Float32Array(frames).fill(c ? 0.5 : 0.25) });
 const text = (m, p, k) => Buffer.from(m.buffer, TEXT, 2 * 3 * TAG).subarray((p * 3 + k) * TAG, (p * 3 + k + 1) * TAG).toString('latin1').replace(/\0.*/, '');
 const lines = (m, p) => [0, 1, 2].map(k => text(m, p, k));
-const handle = name => ({ kind: 'file', name, getFile: async () => ({ size: 1, arrayBuffer: async () => new ArrayBuffer(1) }) });
+const mp3 = (frames, id3 = 0) => {   // MPEG-1 layer III, 128 kbps, 44100 Hz: 417 or 418 bytes a frame; an Info frame first, an ID3v2 tag before
+  const b = new Uint8Array(id3 ? id3 + 10 : 0), out = [b];
+  if (id3) { b.set([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, (id3 >> 7) & 127, id3 & 127]); }
+  for (let k = 0; k <= frames; k++) {
+    const f = new Uint8Array(417 + (k % 2)); f.set([0xff, 0xfb, 0x90 | (k % 2 ? 2 : 0), 0x44]);
+    if (!k) f.set([0x49, 0x6e, 0x66, 0x6f], 36);
+    out.push(f);
+  }
+  return Buffer.concat(out);
+};
+const handle = name => ({ kind: 'file', name, getFile: async () => ({ size: 1, arrayBuffer: async () => name === 'dbl.mp3' ? (b => b.buffer.slice(b.byteOffset, b.byteOffset + b.length))(mp3(100)) : new ArrayBuffer(1) }) });
 const bad = () => { throw new Error('bad file'); };
 const storage = (kept = {}) => {
   globalThis.localStorage = { getItem: k => kept[k] ?? null, setItem: (k, v) => { kept[k] = String(v); } };
@@ -104,6 +115,33 @@ test("a track the decoder returns at another rate than the mixer's 44100 Hz is c
     for (let i = 1; i < x.length; i++) if ((x[i - 1] < 0) !== (x[i] < 0)) zero++;
     assert.ok(Math.abs(zero - 4000) <= 5, `${rate} Hz: ${zero} zero crossings in 2 s`);
     assert.equal(s.radio.song.right === x, channels === 1);
+  }
+});
+
+test('an mp3 is as long as its MPEG frames say: the Info frame and the ID3v2 tag are not counted, a file that is not an mp3 has no length', async () => {
+  assert.ok(Math.abs(mp3Seconds(mp3(100).buffer.slice(0, 417 * 50 + 418 * 51 + 0)) - 100 * 1152 / 44100) < 0.03);
+  const withTag = mp3(100, 300);
+  assert.ok(Math.abs(mp3Seconds(withTag.buffer.slice(withTag.byteOffset, withTag.byteOffset + withTag.length)) - 2.612) < 0.03);
+  assert.equal(mp3Seconds(new ArrayBuffer(1)), null);
+  assert.equal(mp3Seconds(new Uint8Array(100000).buffer), null);
+  const real = process.env.NFSU2_TEST_MP3;
+  if (real && fs.existsSync(real)) assert.ok(Math.abs(mp3Seconds(fs.readFileSync(real).buffer.slice(0)) - 133.5) < 1);
+});
+
+test('a buffer twice as long as its mp3 is laid out again: left and right in turn in one channel, or every frame doubled in each channel', async () => {
+  const n = Math.floor(100 * 1152 / 44100 * 44100), tone = (len, rate) => Float32Array.from({ length: len }, (_, i) => 0.1 * Math.sin(2 * Math.PI * 1000 * i / rate));
+  const inter = new Float32Array(2 * n), one = tone(n, 44100);
+  one.forEach((v, i) => { inter[2 * i] = v; inter[2 * i + 1] = v; });
+  for (const [name, decode] of [['interleaved in one channel', { numberOfChannels: 1, length: 2 * n, getChannelData: () => inter }],
+    ['each channel at twice the frames', { numberOfChannels: 2, length: 2 * n, getChannelData: () => tone(2 * n, 88200) }],
+    ['a right length', { numberOfChannels: 2, length: n, getChannelData: () => one.slice() }]]) {
+    const s = setup(['dbl.mp3'], async () => ({ sampleRate: 44100, ...decode }));
+    await s.started();
+    await s.game(0, 1);
+    const x = s.radio.song.left;
+    let zero = 0;
+    for (let i = 1; i < x.length; i++) if ((x[i - 1] < 0) !== (x[i] < 0)) zero++;
+    assert.ok(Math.abs(x.length - n) <= 1 && Math.abs(zero - 2 * 1000 * n / 44100) <= 8, `${name}: ${x.length} frames, ${zero} zero crossings`);
   }
 });
 
