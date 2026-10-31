@@ -204,6 +204,34 @@ test('input: detach removes every listener and refuses later quits', async () =>
   assert.equal(i.requestQuit(), false);
 });
 
+test('input: a key held through a focus loss presses again at its next autorepeat, one released meanwhile does not', async () => {
+  const proc = fakeProc(), ptr = 8192, h = mailbox(proc, ptr), el = element();
+  const i = attachInput(proc, el, { log: () => {}, gamepads: false });
+  proc.register(3, ptr, 65536);
+  await tick();
+  const key = (type, code, repeat = false) => win.dispatchEvent({ type, code, key: code, repeat, isTrusted: true, keyCode: 37, target: null,
+    altKey: false, ctrlKey: false, shiftKey: false, metaKey: false, isComposing: false, preventDefault() {}, getModifierState: () => false });
+  const log = () => {
+    const u8 = new Uint8Array(proc.memory.buffer), out = [];
+    for (let n = 0; n < Atomics.load(h, IP.IM_EV_W); n++) { const o = ptr + IP.IM_OFF_EV + n * 16; out.push([u8[o], u8[o + 1], u8[o + 3] & IP.IKF_REPEAT ? 'repeat' : '']); }
+    return out;
+  };
+  const LEFT = 0xcb, DOWN = 0xd0;
+  key('keydown', 'ArrowLeft'); key('keydown', 'ArrowLeft', true);
+  key('keydown', 'ArrowDown');
+  el.dispatchEvent({ type: 'blur' });                      // the page's menu took the focus: the game lets both keys go
+  key('keyup', 'ArrowDown');                               // released meanwhile
+  key('keydown', 'ArrowDown', true);                       // (a stray repeat of it)
+  key('keydown', 'ArrowLeft', true);                       // still held: the game gets it pressed
+  key('keydown', 'ArrowLeft', true);                       // and the following repeats are repeats again
+  assert.deepEqual(log(), [
+    [IP.IEV_KEY_DOWN, LEFT, ''], [IP.IEV_KEY_DOWN, LEFT, 'repeat'], [IP.IEV_KEY_DOWN, DOWN, ''],
+    [IP.IEV_RELEASE_ALL, 0, ''], [IP.IEV_KEY_UP, DOWN, ''],
+    [IP.IEV_KEY_DOWN, DOWN, 'repeat'], [IP.IEV_KEY_DOWN, LEFT, ''], [IP.IEV_KEY_DOWN, LEFT, 'repeat'],
+  ]);
+  i.detach();
+});
+
 // ---- renderer ---------------------------------------------------------------------
 function fakeGpu() {
   const rec = { devices: [], unconfigured: 0 };
